@@ -61,24 +61,20 @@ def get_vectorstore(text_chunks):
     if not st.session_state.api_key_configured:
         return None
     
-    # KRITIKAL: Menangkap error dan mencegah kebocoran data
     try:
-        embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=st.secrets["GOOGLE_API_KEY"])
+        # PERBAIKAN: Mengganti model embedding ke versi yang lebih baru dan umum
+        embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004", google_api_key=st.secrets["GOOGLE_API_KEY"])
         vectorstore = FAISS.from_texts(texts=text_chunks, embedding=embeddings)
         return vectorstore
     except Exception as e:
-        # Cek jika error adalah masalah izin CMEK yang spesifik
         if "permission_denied" in str(e).lower() and "cloudkms" in str(e).lower():
             st.error(
-                "Gagal Proses PDF: Izin Google Cloud tidak memadai. " \
-                "Proyek Anda menggunakan enkripsi khusus (CMEK) dan API key ini tidak memiliki izin untuk menggunakannya. " \
-                "Fitur analisis PDF tidak akan berfungsi sampai izin diperbaiki di Google Cloud.",
+                "Gagal Proses PDF: Izin Google Cloud tidak memadai (CMEK).",
                 icon="🔐"
             )
         else:
-            # Menampilkan pesan error yang aman untuk masalah lain
-            st.error(f"Gagal memproses dokumen. Silakan coba lagi.", icon="⚠️")
-        return None # Mengembalikan None agar aplikasi tidak crash
+            st.error(f"Gagal memproses dokumen. Model embedding mungkin tidak tersedia.", icon="⚠️")
+        return None
 
 def get_rag_conversation_chain(vectorstore):
     if not st.session_state.get('llm') or not vectorstore:
@@ -115,20 +111,24 @@ def generate_financial_report():
         col2.metric("Total Pengeluaran", f"Rp{total_expense:,.0f}")
         col3.metric("Keuntungan", f"Rp{profit:,.0f}")
 
-# Prompt template yang sudah diperbaiki (double curly braces)
 FINANCIAL_AGENT_PROMPT = '''
-Anda adalah asisten keuangan AI... (Konten prompt di sini)
+Anda adalah asisten keuangan AI. Analisis teks pengguna untuk niat mereka.
+- Untuk mencatat transaksi, ekstrak: `description`, `type`("Pemasukan"/"Pengeluaran"), dan `amount`.
+- Untuk melihat laporan, set `intent` ke "report".
+- Jika tidak relevan, set `intent` ke "general_conversation".
+
 Contoh:
-- "jual 2 baju 100 ribu" -> {{"intent": "record_transaction", "details": {{"description": "Jual 2 baju", "type": "Pemasukan", "amount": 100000}}}}
-- "catat bensin 50rb" -> {{"intent": "record_transaction", "details": {{"description": "Bensin", "type": "Pengeluaran", "amount": 50000}}}}
-- "laporan keuangan" -> {{"intent": "report"}}
+- "kemarin saya jual 2 baju seharga 100 ribu" -> {{"intent": "record_transaction", "details": {{"description": "Jual 2 baju", "type": "Pemasukan", "amount": 100000}}}}
+- "tolong catat pengeluaran untuk bensin 50rb" -> {{"intent": "record_transaction", "details": {{"description": "Bensin", "type": "Pengeluaran", "amount": 50000}}}}
+- "laporan keuangan bulan ini dong" -> {{"intent": "report"}}
+
 Balas HANYA dengan JSON.
+
 Teks Pengguna: "{user_question}"
 JSON Output:
 '''
 
 def handle_userinput(user_question):
-    # ... (Sisa fungsi handle_userinput tetap sama)
     if not st.session_state.get('llm'):
         st.error("Model LLM tidak terinisialisasi.")
         return
@@ -176,7 +176,6 @@ def main():
         st.error("Kunci API Google (GOOGLE_API_KEY) tidak dikonfigurasi. Harap atur di [Secrets] aplikasi Anda.")
         st.stop()
 
-    # ... (Sisa fungsi main tetap sama) 
     with st.sidebar:
         st.header("Opsi")
         st.subheader("Analisis Dokumen (RAG)")
@@ -187,7 +186,7 @@ def main():
                     raw_text = get_pdf_text(pdf_docs)
                     if raw_text.strip():
                         text_chunks = get_text_chunks(raw_text)
-                        vectorstore = get_vectorstore(text_chunks) # Panggilan fungsi yang sudah aman
+                        vectorstore = get_vectorstore(text_chunks)
                         if vectorstore:
                             st.session_state.conversation_rag = get_rag_conversation_chain(vectorstore)
                             st.success("Dokumen berhasil diproses!")
@@ -213,7 +212,7 @@ def main():
                 if message["role"] == "assistant" and message["content"] == "Tentu, ini laporan keuangan Anda saat ini.":
                     generate_financial_report()
 
-    if user_question := st.chat_input("Tanya apa saja atau catat transaksi..."):        
+    if user_question := st.chat_input("Tanya apa saja atau catat transaksi..."):
         handle_userinput(user_question)
         st.rerun()
 

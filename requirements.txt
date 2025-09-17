@@ -6,3 +6,5 @@ python-dotenv
 pypdf2
 pandas
 matplotlib
+langchain-community
+faiss-cpu

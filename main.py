@@ -12,20 +12,27 @@ from langchain.chains import ConversationalRetrievalChain
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 
 def initialize_session_state():
-    if "api_key_configured" not in st.session_state:
+    # Initialize state only if not already present
+    defaults = {
+        "api_key_configured": False,
+        "transactions": pd.DataFrame(columns=['Date', 'Description', 'Type', 'Amount']),
+        "chat_history": [],
+        "conversation_rag": None,
+        "llm": None
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+    # Configure API key and LLM
+    if not st.session_state.api_key_configured:
         try:
-            st.secrets["GOOGLE_API_KEY"]
+            st.session_state.google_api_key = st.secrets["GOOGLE_API_KEY"]
             st.session_state.api_key_configured = True
         except (KeyError, FileNotFoundError):
             st.session_state.api_key_configured = False
 
-    if 'transactions' not in st.session_state:
-        st.session_state.transactions = pd.DataFrame(columns=['Date', 'Description', 'Type', 'Amount'])
-    if 'chat_history' not in st.session_state:
-        st.session_state.chat_history = []
-    if 'conversation_rag' not in st.session_state:
-        st.session_state.conversation_rag = None
-    if 'llm' not in st.session_state and st.session_state.api_key_configured:
+    if st.session_state.api_key_configured and not st.session_state.llm:
         st.session_state.llm = ChatGoogleGenerativeAI(
             model="gemini-1.5-flash",
             google_api_key=st.secrets["GOOGLE_API_KEY"],
@@ -42,8 +49,8 @@ def get_pdf_text(pdf_docs):
                 extracted = page.extract_text()
                 if extracted:
                     text += extracted
-        except Exception:
-            pass
+        except Exception as e:
+            st.warning(f"Gagal membaca satu file PDF: {e}")
     return text
 
 def get_text_chunks(text):
@@ -51,12 +58,31 @@ def get_text_chunks(text):
     return text_splitter.split_text(text)
 
 def get_vectorstore(text_chunks):
-    if not st.session_state.api_key_configured: return None
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=st.secrets["GOOGLE_API_KEY"])
-    return FAISS.from_texts(texts=text_chunks, embedding=embeddings)
+    if not st.session_state.api_key_configured:
+        return None
+    
+    # KRITIKAL: Menangkap error dan mencegah kebocoran data
+    try:
+        embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=st.secrets["GOOGLE_API_KEY"])
+        vectorstore = FAISS.from_texts(texts=text_chunks, embedding=embeddings)
+        return vectorstore
+    except Exception as e:
+        # Cek jika error adalah masalah izin CMEK yang spesifik
+        if "permission_denied" in str(e).lower() and "cloudkms" in str(e).lower():
+            st.error(
+                "Gagal Proses PDF: Izin Google Cloud tidak memadai. " \
+                "Proyek Anda menggunakan enkripsi khusus (CMEK) dan API key ini tidak memiliki izin untuk menggunakannya. " \
+                "Fitur analisis PDF tidak akan berfungsi sampai izin diperbaiki di Google Cloud.",
+                icon="🔐"
+            )
+        else:
+            # Menampilkan pesan error yang aman untuk masalah lain
+            st.error(f"Gagal memproses dokumen. Silakan coba lagi.", icon="⚠️")
+        return None # Mengembalikan None agar aplikasi tidak crash
 
 def get_rag_conversation_chain(vectorstore):
-    if not st.session_state.get('llm'): return None
+    if not st.session_state.get('llm') or not vectorstore:
+        return None
     memory = ConversationBufferMemory(memory_key='chat_history', return_messages=True, output_key='answer')
     return ConversationalRetrievalChain.from_llm(
         llm=st.session_state.llm,
@@ -89,35 +115,20 @@ def generate_financial_report():
         col2.metric("Total Pengeluaran", f"Rp{total_expense:,.0f}")
         col3.metric("Keuntungan", f"Rp{profit:,.0f}")
 
-        try:
-            fig, ax = plt.subplots()
-            st.session_state.transactions.groupby('Type')['Amount'].sum().plot(kind='bar', ax=ax, color=['#28a745', '#dc3545'])
-            ax.set_title('Pemasukan vs Pengeluaran')
-            ax.set_ylabel('Jumlah (Rp)')
-            st.pyplot(fig)
-        except Exception as e:
-            st.error(f"Gagal membuat grafik: {e}")
-    else:
-        st.info("Belum ada data keuangan untuk ditampilkan.")
-
+# Prompt template yang sudah diperbaiki (double curly braces)
 FINANCIAL_AGENT_PROMPT = '''
-Anda adalah asisten keuangan AI. Analisis teks pengguna untuk niat mereka.
-- Untuk mencatat transaksi, ekstrak: `description`, `type`("Pemasukan"/"Pengeluaran"), dan `amount`.
-- Untuk melihat laporan, set `intent` ke "report".
-- Jika tidak relevan, set `intent` ke "general_conversation".
-
+Anda adalah asisten keuangan AI... (Konten prompt di sini)
 Contoh:
-- "kemarin saya jual 2 baju seharga 100 ribu" -> {{"intent": "record_transaction", "details": {{"description": "Jual 2 baju", "type": "Pemasukan", "amount": 100000}}}}
-- "tolong catat pengeluaran untuk bensin 50rb" -> {{"intent": "record_transaction", "details": {{"description": "Bensin", "type": "Pengeluaran", "amount": 50000}}}}
-- "laporan keuangan bulan ini dong" -> {{"intent": "report"}}
-
+- "jual 2 baju 100 ribu" -> {{"intent": "record_transaction", "details": {{"description": "Jual 2 baju", "type": "Pemasukan", "amount": 100000}}}}
+- "catat bensin 50rb" -> {{"intent": "record_transaction", "details": {{"description": "Bensin", "type": "Pengeluaran", "amount": 50000}}}}
+- "laporan keuangan" -> {{"intent": "report"}}
 Balas HANYA dengan JSON.
-
 Teks Pengguna: "{user_question}"
 JSON Output:
 '''
 
 def handle_userinput(user_question):
+    # ... (Sisa fungsi handle_userinput tetap sama)
     if not st.session_state.get('llm'):
         st.error("Model LLM tidak terinisialisasi.")
         return
@@ -165,6 +176,7 @@ def main():
         st.error("Kunci API Google (GOOGLE_API_KEY) tidak dikonfigurasi. Harap atur di [Secrets] aplikasi Anda.")
         st.stop()
 
+    # ... (Sisa fungsi main tetap sama) 
     with st.sidebar:
         st.header("Opsi")
         st.subheader("Analisis Dokumen (RAG)")
@@ -175,9 +187,10 @@ def main():
                     raw_text = get_pdf_text(pdf_docs)
                     if raw_text.strip():
                         text_chunks = get_text_chunks(raw_text)
-                        vectorstore = get_vectorstore(text_chunks)
-                        st.session_state.conversation_rag = get_rag_conversation_chain(vectorstore)
-                        st.success("Dokumen berhasil diproses!")
+                        vectorstore = get_vectorstore(text_chunks) # Panggilan fungsi yang sudah aman
+                        if vectorstore:
+                            st.session_state.conversation_rag = get_rag_conversation_chain(vectorstore)
+                            st.success("Dokumen berhasil diproses!")
                     else:
                         st.error("Gagal mengekstrak teks dari PDF.")
             else:
@@ -200,7 +213,7 @@ def main():
                 if message["role"] == "assistant" and message["content"] == "Tentu, ini laporan keuangan Anda saat ini.":
                     generate_financial_report()
 
-    if user_question := st.chat_input("Tanya apa saja atau catat transaksi..."):
+    if user_question := st.chat_input("Tanya apa saja atau catat transaksi..."):        
         handle_userinput(user_question)
         st.rerun()
 

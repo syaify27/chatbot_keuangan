@@ -32,12 +32,12 @@ except Exception as e:
     st.stop()
 
 # --- Langkah 3: Inisialisasi Model ---
-st.write("### Langkah 3: Inisialisasi Model `gemini-pro`")
+st.write("### Langkah 3: Inisialisasi Model `gemini-1.5-flash`")
 try:
-    model = genai.GenerativeModel('gemini-pro')
-    st.success("Model `gemini-pro` berhasil diinisialisasi.")
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    st.success("Model `gemini-1.5-flash` berhasil diinisialisasi.")
 except Exception as e:
-    st.error("Gagal menginisialisasi model. Ini bisa jadi masalah dengan kunci API atau izin.")
+    st.error("Gagal menginisialisasi model. Ini bisa jadi masalah dengan kunci API atau izin. Atau nama model salah.")
     st.exception(e)
     st.stop()
 
@@ -63,10 +63,8 @@ if prompt := st.chat_input("Kirim pesan ke Gemini..."):
     with st.chat_message("assistant"):
         message_placeholder = st.empty()
         try:
-            with st.spinner("Memanggil API Google..."):
-                # Panggilan API paling krusial
+            with st.spinner("Memanggil API Google..."):               
                 response = model.generate_content(prompt)
-                # Akses teks dari respons
                 full_response = response.text
             message_placeholder.markdown(full_response)
             st.session_state.messages.append({"role": "assistant", "content": full_response})

@@ -23,7 +23,7 @@ def initialize_session_state():
     if 'conversation_rag' not in st.session_state:
         st.session_state.conversation_rag = None
     if 'llm' not in st.session_state:
-        st.session_state.llm = ChatGoogleGenerativeAI(model="gemini-pro", temperature=0.4)
+        st.session_state.llm = ChatGoogleGenerativeAI(model="gemini-pro", temperature=0.4, convert_system_message_to_human=True)
 
 # --- RAG (PDF Processing) Functions ---
 def get_pdf_text(pdf_docs):
@@ -99,10 +99,10 @@ Jika pengguna ingin **melihat laporan**, set `intent` ke "report".
 Jika teks pengguna tidak terkait dengan kedua hal tersebut, set `intent` ke "general_conversation".
 
 Contoh:
-- "kemarin saya jual 2 baju seharga 100 ribu" -> `{"intent": "record_transaction", "details": {"description": "Jual 2 baju", "type": "Pemasukan", "amount": 100000}}`
-- "tolong catat pengeluaran untuk bensin 50rb" -> `{"intent": "record_transaction", "details": {"description": "Bensin", "type": "Pengeluaran", "amount": 50000}}`
-- "laporan keuangan bulan ini dong" -> `{"intent": "report"}`
-- "bagaimana cuaca hari ini?" -> `{"intent": "general_conversation"}`
+- "kemarin saya jual 2 baju seharga 100 ribu" -> `{{ "intent": "record_transaction", "details": {{ "description": "Jual 2 baju", "type": "Pemasukan", "amount": 100000 }} }}`
+- "tolong catat pengeluaran untuk bensin 50rb" -> `{{ "intent": "record_transaction", "details": {{ "description": "Bensin", "type": "Pengeluaran", "amount": 50000 }} }}`
+- "laporan keuangan bulan ini dong" -> `{{ "intent": "report" }}`
+- "bagaimana cuaca hari ini?" -> `{{ "intent": "general_conversation" }}`
 
 Selalu balas HANYA dengan format JSON yang valid.
 
@@ -118,7 +118,9 @@ def handle_userinput(user_question):
     response_text = llm.predict(prompt)
     
     try:
-        analysis = json.loads(response_text)
+        # Clean the response text to ensure it's valid JSON
+        cleaned_text = response_text.strip().replace('```json', '').replace('```', '')
+        analysis = json.loads(cleaned_text)
         intent = analysis.get("intent")
     except (json.JSONDecodeError, AttributeError):
         intent = "general_conversation"
@@ -137,14 +139,16 @@ def handle_userinput(user_question):
     elif intent == "report":
         bot_response = "Tentu, ini laporan keuangan Anda saat ini."
         st.session_state.chat_history.append({"role": "assistant", "content": bot_response})
-        generate_financial_report() # This function will use st.write, etc.
+        # Display the response first, then generate the report on rerun
 
     else: # general_conversation or RAG
         if st.session_state.conversation_rag:
             response = st.session_state.conversation_rag({'question': user_question})
             bot_response = response['answer']
         else:
-            bot_response = llm.predict(f"User: {user_question}\nAI:")
+            # For general chat, it's better to wrap the user question for context
+            general_prompt = f"Human: {user_question}\nAI Assistant:"
+            bot_response = llm.predict(general_prompt)
         st.session_state.chat_history.append({"role": "assistant", "content": bot_response})
 
 
@@ -179,10 +183,15 @@ def main():
             record_transaction(desc, typ, amt)
 
     # Main chat interface
+    # Display chat history
     for message in st.session_state.chat_history:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
+            # If the bot asked for a report, generate it here after showing the message
+            if message["role"] == "assistant" and message["content"] == "Tentu, ini laporan keuangan Anda saat ini.":
+                generate_financial_report()
 
+    # Handle new user input
     if user_question := st.chat_input("Tanya apa saja atau catat transaksi..."):
         handle_userinput(user_question)
         st.experimental_rerun()

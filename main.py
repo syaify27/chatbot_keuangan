@@ -10,20 +10,32 @@ from langchain.chains import ConversationalRetrievalChain
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 import pandas as pd
 import matplotlib.pyplot as plt
-from dotenv import load_dotenv
-
-load_dotenv()
 
 # --- Initialization ---
 def initialize_session_state():
+    # Check for API key first
+    if "api_key_configured" not in st.session_state:
+        try:
+            # This is the correct way to access secrets in Streamlit Cloud
+            st.session_state.google_api_key = st.secrets["GOOGLE_API_KEY"]
+            st.session_state.api_key_configured = True
+        except (KeyError, FileNotFoundError):
+            # This handles cases where the secret isn't set
+            st.session_state.api_key_configured = False
+
     if 'transactions' not in st.session_state:
         st.session_state.transactions = pd.DataFrame(columns=['Date', 'Description', 'Type', 'Amount'])
     if 'chat_history' not in st.session_state:
         st.session_state.chat_history = []
     if 'conversation_rag' not in st.session_state:
         st.session_state.conversation_rag = None
-    if 'llm' not in st.session_state:
-        st.session_state.llm = ChatGoogleGenerativeAI(model="gemini-pro", temperature=0.4, convert_system_message_to_human=True)
+    if 'llm' not in st.session_state and st.session_state.api_key_configured:
+        st.session_state.llm = ChatGoogleGenerativeAI(
+            model="gemini-pro", 
+            google_api_key=st.session_state.google_api_key,
+            temperature=0.4, 
+            convert_system_message_to_human=True
+        )
 
 # --- RAG (PDF Processing) Functions ---
 def get_pdf_text(pdf_docs):
@@ -41,10 +53,12 @@ def get_text_chunks(text):
     return text_splitter.split_text(text)
 
 def get_vectorstore(text_chunks):
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+    if not st.session_state.api_key_configured: return None
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=st.session_state.google_api_key)
     return FAISS.from_texts(texts=text_chunks, embedding=embeddings)
 
 def get_rag_conversation_chain(vectorstore):
+    if not st.session_state.api_key_configured: return None
     memory = ConversationBufferMemory(memory_key='chat_history', return_messages=True, output_key='answer')
     return ConversationalRetrievalChain.from_llm(
         llm=st.session_state.llm,
@@ -86,7 +100,7 @@ def generate_financial_report():
         st.info("Belum ada data keuangan untuk ditampilkan. Silakan catat transaksi pertama Anda.")
 
 
-FINANCIAL_AGENT_PROMPT = """
+FINANCIAL_AGENT_PROMPT = '''
 Anda adalah asisten keuangan AI yang sangat cerdas. Tugas Anda adalah menganalisis teks dari pengguna untuk mengidentifikasi niat mereka, apakah itu untuk mencatat transaksi keuangan atau meminta laporan.
 
 Jika pengguna ingin **mencatat transaksi**, ekstrak informasi berikut:
@@ -108,56 +122,52 @@ Selalu balas HANYA dengan format JSON yang valid.
 
 Teks Pengguna: "{user_question}"
 JSON Output:
-"""
+'''
 
 def handle_userinput(user_question):
     llm = st.session_state.llm
     
-    # 1. Analyze intent
     prompt = FINANCIAL_AGENT_PROMPT.format(user_question=user_question)
     response_text = llm.predict(prompt)
     
     try:
-        # Clean the response text to ensure it's valid JSON
         cleaned_text = response_text.strip().replace('```json', '').replace('```', '')
         analysis = json.loads(cleaned_text)
         intent = analysis.get("intent")
     except (json.JSONDecodeError, AttributeError):
         intent = "general_conversation"
 
-    # Add user message to history
     st.session_state.chat_history.append({"role": "user", "content": user_question})
 
     bot_response = ""
-    # 2. Execute action based on intent
     if intent == "record_transaction":
         details = analysis.get("details", {})
         record_transaction(details.get("description"), details.get("type"), details.get("amount"))
         bot_response = f"Baik, saya sudah mencatat: {details.get('description', '')} sejumlah Rp{details.get('amount', 0):,.0f} sebagai {details.get('type', '')}."
         st.session_state.chat_history.append({"role": "assistant", "content": bot_response})
     
-    elif intent == "report":
+elif intent == "report":
         bot_response = "Tentu, ini laporan keuangan Anda saat ini."
         st.session_state.chat_history.append({"role": "assistant", "content": bot_response})
-        # Display the response first, then generate the report on rerun
 
-    else: # general_conversation or RAG
+    else:
         if st.session_state.conversation_rag:
             response = st.session_state.conversation_rag({'question': user_question})
             bot_response = response['answer']
         else:
-            # For general chat, it's better to wrap the user question for context
             general_prompt = f"Human: {user_question}\nAI Assistant:"
             bot_response = llm.predict(general_prompt)
         st.session_state.chat_history.append({"role": "assistant", "content": bot_response})
-
 
 def main():
     st.set_page_config(page_title="Asisten Keuangan AI", page_icon="💡")
     st.header("Asisten Keuangan AI 💡")
     initialize_session_state()
 
-    # Sidebar for PDF processing
+    if not st.session_state.api_key_configured:
+        st.error("Kunci API Google (GOOGLE_API_KEY) tidak dikonfigurasi. Harap tambahkan di menu [Manage app] > [Settings] > [Secrets].")
+        st.stop()
+
     with st.sidebar:
         st.subheader("Analisis Dokumen (Opsional)")
         pdf_docs = st.file_uploader("Unggah PDF & klik 'Proses'", accept_multiple_files=True)
@@ -183,18 +193,15 @@ def main():
             record_transaction(desc, typ, amt)
 
     # Main chat interface
-    # Display chat history
     for message in st.session_state.chat_history:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
-            # If the bot asked for a report, generate it here after showing the message
             if message["role"] == "assistant" and message["content"] == "Tentu, ini laporan keuangan Anda saat ini.":
                 generate_financial_report()
 
-    # Handle new user input
     if user_question := st.chat_input("Tanya apa saja atau catat transaksi..."):
         handle_userinput(user_question)
-        st.experimental_rerun()
+        st.rerun()
 
 if __name__ == '__main__':
     main()

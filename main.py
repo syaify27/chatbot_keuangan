@@ -13,14 +13,11 @@ import matplotlib.pyplot as plt
 
 # --- Initialization ---
 def initialize_session_state():
-    # Check for API key first
     if "api_key_configured" not in st.session_state:
         try:
-            # This is the correct way to access secrets in Streamlit Cloud
             st.session_state.google_api_key = st.secrets["GOOGLE_API_KEY"]
             st.session_state.api_key_configured = True
         except (KeyError, FileNotFoundError):
-            # This handles cases where the secret isn't set
             st.session_state.api_key_configured = False
 
     if 'transactions' not in st.session_state:
@@ -99,7 +96,6 @@ def generate_financial_report():
     else:
         st.info("Belum ada data keuangan untuk ditampilkan. Silakan catat transaksi pertama Anda.")
 
-
 FINANCIAL_AGENT_PROMPT = '''
 Anda adalah asisten keuangan AI yang sangat cerdas. Tugas Anda adalah menganalisis teks dari pengguna untuk mengidentifikasi niat mereka, apakah itu untuk mencatat transaksi keuangan atau meminta laporan.
 
@@ -145,11 +141,9 @@ def handle_userinput(user_question):
         record_transaction(details.get("description"), details.get("type"), details.get("amount"))
         bot_response = f"Baik, saya sudah mencatat: {details.get('description', '')} sejumlah Rp{details.get('amount', 0):,.0f} sebagai {details.get('type', '')}."
         st.session_state.chat_history.append({"role": "assistant", "content": bot_response})
-    
-elif intent == "report":
+    elif intent == "report":
         bot_response = "Tentu, ini laporan keuangan Anda saat ini."
         st.session_state.chat_history.append({"role": "assistant", "content": bot_response})
-
     else:
         if st.session_state.conversation_rag:
             response = st.session_state.conversation_rag({'question': user_question})
@@ -192,7 +186,6 @@ def main():
         if st.button("Catat Manual"):
             record_transaction(desc, typ, amt)
 
-    # Main chat interface
     for message in st.session_state.chat_history:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])

@@ -1,74 +1,215 @@
 
 import streamlit as st
-import google.generativeai as genai
 import os
+import json
+from PyPDF2 import PdfReader
+from langchain.text_splitter import CharacterTextSplitter
+from langchain_community.vectorstores import FAISS
+from langchain.memory import ConversationBufferMemory
+from langchain.chains import ConversationalRetrievalChain
+from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
+import pandas as pd
+import matplotlib.pyplot as plt
 
-# --- Konfigurasi Halaman dan Judul ---
-st.set_page_config(page_title="Tes Chatbot Gemini Paling Dasar", page_icon="🔥")
-st.title("🔥 Tes Chatbot Paling Dasar")
-st.caption("Menghilangkan semua kerumitan, hanya tes koneksi murni ke Google API.")
-
-# --- Langkah 1: Konfigurasi Kunci API ---
-st.write("### Langkah 1: Membaca Kunci API")
-api_key = None
-try:
-    # Cara yang benar untuk mengakses secrets di Streamlit Cloud
-    api_key = st.secrets["GOOGLE_API_KEY"]
-    st.success("Kunci API (GOOGLE_API_KEY) berhasil dibaca dari secrets.")
-    st.info(f"Kunci API dimulai dengan: `{api_key[:4]}...`")
-except (KeyError, FileNotFoundError):
-    st.error("Kunci API (GOOGLE_API_KEY) tidak ditemukan di Streamlit Secrets.")
-    st.warning("Mohon periksa kembali [Manage app] > [Settings] > [Secrets].")
-    st.stop()
-
-# --- Langkah 2: Mengkonfigurasi Library Google AI ---
-st.write("### Langkah 2: Mengkonfigurasi Library Google AI")
-try:
-    genai.configure(api_key=api_key)
-    st.success("Library Google AI berhasil dikonfigurasi.")
-except Exception as e:
-    st.error("Terjadi error saat mengkonfigurasi library Google AI.")
-    st.exception(e)
-    st.stop()
-
-# --- Langkah 3: Inisialisasi Model ---
-st.write("### Langkah 3: Inisialisasi Model `gemini-1.5-flash`")
-try:
-    model = genai.GenerativeModel('gemini-1.5-flash')
-    st.success("Model `gemini-1.5-flash` berhasil diinisialisasi.")
-except Exception as e:
-    st.error("Gagal menginisialisasi model. Ini bisa jadi masalah dengan kunci API atau izin. Atau nama model salah.")
-    st.exception(e)
-    st.stop()
-
-# --- Langkah 4: Antarmuka Chat ---
-st.write("### Langkah 4: Mulai Chat!")
-st.info("Jika semua langkah di atas berhasil, chatbot di bawah ini seharusnya berfungsi.")
-
-# Inisialisasi riwayat chat
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-# Tampilkan pesan lama
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-
-# Terima input pengguna
-if prompt := st.chat_input("Kirim pesan ke Gemini..."):    
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
-
-    with st.chat_message("assistant"):
-        message_placeholder = st.empty()
+# --- Initialization ---
+def initialize_session_state():
+    if "api_key_configured" not in st.session_state:
         try:
-            with st.spinner("Memanggil API Google..."):               
-                response = model.generate_content(prompt)
-                full_response = response.text
-            message_placeholder.markdown(full_response)
-            st.session_state.messages.append({"role": "assistant", "content": full_response})
-        except Exception as e:
-            st.error("GAGAL TOTAL saat memanggil API. Ini adalah akar masalahnya.")
-            st.exception(e)
+            st.session_state.google_api_key = st.secrets["GOOGLE_API_KEY"]
+            st.session_state.api_key_configured = True
+        except (KeyError, FileNotFoundError):
+            st.session_state.api_key_configured = False
 
+    if 'transactions' not in st.session_state:
+        st.session_state.transactions = pd.DataFrame(columns=['Date', 'Description', 'Type', 'Amount'])
+    if 'chat_history' not in st.session_state:
+        st.session_state.chat_history = []
+    if 'conversation_rag' not in st.session_state:
+        st.session_state.conversation_rag = None
+    if 'llm' not in st.session_state and st.session_state.api_key_configured:
+        # MENGGUNAKAN MODEL YANG SUDAH TERBUKTI BERHASIL
+        st.session_state.llm = ChatGoogleGenerativeAI(
+            model="gemini-1.5-flash", 
+            google_api_key=st.session_state.google_api_key,
+            temperature=0.4, 
+            convert_system_message_to_human=True
+        )
+
+# --- RAG (PDF Processing) Functions ---
+def get_pdf_text(pdf_docs):
+    text = ""
+    for pdf in pdf_docs:
+        pdf_reader = PdfReader(pdf)
+        for page in pdf_reader.pages:
+            extracted = page.extract_text()
+            if extracted:
+                text += extracted
+    return text
+
+def get_text_chunks(text):
+    text_splitter = CharacterTextSplitter(separator="\n", chunk_size=1000, chunk_overlap=200, length_function=len)
+    return text_splitter.split_text(text)
+
+def get_vectorstore(text_chunks):
+    if not st.session_state.api_key_configured: return None
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=st.session_state.google_api_key)
+    return FAISS.from_texts(texts=text_chunks, embedding=embeddings)
+
+def get_rag_conversation_chain(vectorstore):
+    if not st.session_state.api_key_configured: return None
+    memory = ConversationBufferMemory(memory_key='chat_history', return_messages=True, output_key='answer')
+    return ConversationalRetrievalChain.from_llm(
+        llm=st.session_state.llm,
+        retriever=vectorstore.as_retriever(),
+        memory=memory,
+        return_source_documents=True,
+        output_key='answer'
+    )
+
+# --- Financial Agent Functions ---
+def record_transaction(description, trans_type, amount):
+    if not description or not trans_type or amount is None:
+        return
+    today = pd.to_datetime('today').strftime('%Y-%m-%d')
+    new_transaction = pd.DataFrame([[today, description, trans_type, amount]], columns=['Date', 'Description', 'Type', 'Amount'])
+    st.session_state.transactions = pd.concat([st.session_state.transactions, new_transaction], ignore_index=True)
+    st.toast(f"Transaksi dicatat: {description} ({trans_type}) - Rp{amount:,.0f}")
+
+def generate_financial_report():
+    if not st.session_state.transactions.empty:
+        st.subheader("Laporan Keuangan Terkini")
+        st.dataframe(st.session_state.transactions)
+        
+        total_income = st.session_state.transactions[st.session_state.transactions['Type'] == 'Pemasukan']['Amount'].sum()
+        total_expense = st.session_state.transactions[st.session_state.transactions['Type'] == 'Pengeluaran']['Amount'].sum()
+        profit = total_income - total_expense
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total Pemasukan", f"Rp{total_income:,.0f}")
+        col2.metric("Total Pengeluaran", f"Rp{total_expense:,.0f}")
+        col3.metric("Keuntungan", f"Rp{profit:,.0f}")
+
+        fig, ax = plt.subplots()
+        st.session_state.transactions.groupby('Type')['Amount'].sum().plot(kind='bar', ax=ax, color=['#d4edda', '#f8d7da'])
+        ax.set_title('Pemasukan vs Pengeluaran')
+        ax.set_ylabel('Jumlah (Rp)')
+        st.pyplot(fig)
+    else:
+        st.info("Belum ada data keuangan untuk ditampilkan. Silakan catat transaksi pertama Anda.")
+
+FINANCIAL_AGENT_PROMPT = '''
+Anda adalah asisten keuangan AI yang sangat cerdas. Tugas Anda adalah menganalisis teks dari pengguna untuk mengidentifikasi niat mereka, apakah itu untuk mencatat transaksi keuangan atau meminta laporan.
+
+Jika pengguna ingin **mencatat transaksi**, ekstrak informasi berikut:
+- `description`: Deskripsi singkat dan jelas tentang transaksi.
+- `type`: Tipe transaksi, harus salah satu dari "Pemasukan" atau "Pengeluaran".
+- `amount`: Jumlah transaksi dalam bentuk angka, tanpa titik atau koma.
+
+Jika pengguna ingin **melihat laporan**, set `intent` ke "report".
+
+Jika teks pengguna tidak terkait dengan kedua hal tersebut, set `intent` ke "general_conversation".
+
+Contoh:
+- "kemarin saya jual 2 baju seharga 100 ribu" -> { "intent": "record_transaction", "details": { "description": "Jual 2 baju", "type": "Pemasukan", "amount": 100000 } }
+- "tolong catat pengeluaran untuk bensin 50rb" -> { "intent": "record_transaction", "details": { "description": "Bensin", "type": "Pengeluaran", "amount": 50000 } }
+- "laporan keuangan bulan ini dong" -> { "intent": "report" }
+- "bagaimana cuaca hari ini?" -> { "intent": "general_conversation" }
+
+Selalu balas HANYA dengan format JSON yang valid.
+
+Teks Pengguna: "{user_question}"
+JSON Output:
+'''
+
+def handle_userinput(user_question):
+    # Need to use a JSON-compatible model. Flash should work.
+    llm = st.session_state.llm
+    
+    # Use a modified prompt that asks for JSON directly.
+    prompt = FINANCIAL_AGENT_PROMPT.format(user_question=user_question)
+    
+    # The model's response should be a JSON string.
+    response_text = llm.predict(prompt)
+    
+    try:
+        # Clean up potential markdown formatting from the response
+        cleaned_text = response_text.strip().replace('```json', '').replace('```', '')
+        analysis = json.loads(cleaned_text)
+        intent = analysis.get("intent")
+    except (json.JSONDecodeError, AttributeError) as e:
+        # If parsing fails, fall back to general conversation
+        intent = "general_conversation"
+
+    # Append user's question to chat history
+    st.session_state.chat_history.append({"role": "user", "content": user_question})
+
+    # Handle the intent
+    bot_response_content = ""
+    if intent == "record_transaction":
+        details = analysis.get("details", {})
+        record_transaction(details.get("description"), details.get("type"), details.get("amount"))
+        bot_response_content = f"Baik, saya sudah mencatat: {details.get('description', '')} sejumlah Rp{details.get('amount', 0):,.0f} sebagai {details.get('type', '')}."
+        st.session_state.chat_history.append({"role": "assistant", "content": bot_response_content})
+    
+elif intent == "report":
+        bot_response_content = "Tentu, ini laporan keuangan Anda saat ini."
+        st.session_state.chat_history.append({"role": "assistant", "content": bot_response_content})
+    else: # general_conversation or fallback
+        # Use RAG chain if available, otherwise use the base LLM
+        if st.session_state.conversation_rag:
+            response = st.session_state.conversation_rag({'question': user_question})
+            bot_response_content = response['answer']
+        else:
+            # Fallback to a direct prediction if no RAG is set up
+            bot_response_content = llm.predict(f"Human: {user_question}\nAI Assistant:")
+        st.session_state.chat_history.append({"role": "assistant", "content": bot_response_content})
+
+def main():
+    st.set_page_config(page_title="Asisten Keuangan AI", page_icon="💡")
+    st.header("Asisten Keuangan AI 💡")
+    initialize_session_state()
+
+    if not st.session_state.api_key_configured:
+        st.error("Kunci API Google (GOOGLE_API_KEY) tidak dikonfigurasi. Harap tambahkan di menu [Manage app] > [Settings] > [Secrets].")
+        st.stop()
+
+    # Sidebar for PDF upload and manual entry
+    with st.sidebar:
+        st.subheader("Analisis Dokumen (RAG)")
+        pdf_docs = st.file_uploader("Unggah PDF & klik 'Proses'", accept_multiple_files=True)
+        if st.button("Proses Dokumen"):
+            if pdf_docs:
+                with st.spinner("Memproses Dokumen..."):
+                    raw_text = get_pdf_text(pdf_docs)
+                    if raw_text.strip():
+                        text_chunks = get_text_chunks(raw_text)
+                        vectorstore = get_vectorstore(text_chunks)
+                        st.session_state.conversation_rag = get_rag_conversation_chain(vectorstore)
+                        st.success("Dokumen berhasil diproses!")
+                    else:
+                        st.error("Gagal mengekstrak teks dari PDF.")
+            else:
+                st.warning("Harap unggah file PDF terlebih dahulu.")
+        
+        st.subheader("Input Manual")
+        desc = st.text_input("Deskripsi")
+        typ = st.selectbox("Tipe", ["Pemasukan", "Pengeluaran"])
+        amt = st.number_input("Jumlah", min_value=0.0, format="%.2f")
+        if st.button("Catat Manual"):
+            record_transaction(desc, typ, amt)
+
+    # Main chat interface
+    for message in st.session_state.chat_history:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+            # Special handling to display the report after the message
+            if message["role"] == "assistant" and message["content"] == "Tentu, ini laporan keuangan Anda saat ini.":
+                generate_financial_report()
+
+    # Chat input at the bottom
+    if user_question := st.chat_input("Tanya apa saja atau catat transaksi..."):
+        handle_userinput(user_question)
+        st.rerun()
+
+if __name__ == '__main__':
+    main()
